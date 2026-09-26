@@ -50,6 +50,12 @@ class Insta_Admin {
 			'sanitize_callback' => array( __CLASS__, 'sanitize_session_id' ),
 			'default'           => '',
 		) );
+
+		register_setting( 'insta_lookup_options_group', 'insta_lookup_proxy', array(
+			'type'              => 'string',
+			'sanitize_callback' => 'sanitize_text_field',
+			'default'           => '',
+		) );
 	}
 
 	/**
@@ -153,6 +159,42 @@ class Insta_Admin {
 									<?php endif; ?>
 								</td>
 							</tr>
+
+							<tr>
+								<th scope="row">
+									<label for="insta_lookup_proxy"><?php esc_html_e( 'HTTP / SOCKS5 Proxy (Optional)', 'insta-profile-lookup' ); ?></label>
+								</th>
+								<td>
+									<?php
+									$is_proxy_const = defined( 'INSTA_PROXY' ) && ! empty( INSTA_PROXY );
+									$stored_proxy   = get_option( 'insta_lookup_proxy', '' );
+									if ( $is_proxy_const ) :
+									?>
+										<input
+											type="text"
+											id="insta_lookup_proxy"
+											value="<?php echo esc_attr( preg_replace( '/:(?:[^@:]+)@/', ':****@', INSTA_PROXY ) ); ?>"
+											class="regular-text"
+											disabled="disabled"
+										/>
+										<p class="description">
+											<?php esc_html_e( 'Configured securely via INSTA_PROXY constant in wp-config.php.', 'insta-profile-lookup' ); ?>
+										</p>
+									<?php else : ?>
+										<input
+											type="text"
+											name="insta_lookup_proxy"
+											id="insta_lookup_proxy"
+											value="<?php echo esc_attr( $stored_proxy ); ?>"
+											placeholder="http://user:pass@proxy-ip:port"
+											class="regular-text"
+										/>
+										<p class="description">
+											<?php esc_html_e( 'Optional. If your web host IP is rate-limited by Instagram, route requests through a residential or datacenter proxy (supports HTTP, HTTPS, SOCKS5). Format: http://proxy-ip:port or http://user:pass@proxy-ip:port. Alternatively define INSTA_PROXY in wp-config.php.', 'insta-profile-lookup' ); ?>
+										</p>
+									<?php endif; ?>
+								</td>
+							</tr>
 						</table>
 
 						<?php submit_button(); ?>
@@ -222,6 +264,19 @@ class Insta_Admin {
 		}
 		$stored = get_option( 'insta_lookup_session_id', '' );
 		return self::decrypt_value( $stored );
+	}
+
+	/**
+	 * Get the configured proxy string (if any).
+	 * Checks INSTA_PROXY constant first, then stored option.
+	 *
+	 * @return string Proxy address or empty string.
+	 */
+	public static function get_proxy() {
+		if ( defined( 'INSTA_PROXY' ) && ! empty( INSTA_PROXY ) ) {
+			return (string) INSTA_PROXY;
+		}
+		return (string) get_option( 'insta_lookup_proxy', '' );
 	}
 
 	/**

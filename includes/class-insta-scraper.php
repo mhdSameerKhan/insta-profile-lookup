@@ -212,7 +212,20 @@ class Insta_Scraper {
 			$username
 		);
 
+		$proxy = Insta_Admin::get_proxy();
+		$proxy_callback = null;
+		if ( ! empty( $proxy ) ) {
+			$proxy_callback = function( $handle ) use ( $proxy ) {
+				curl_setopt( $handle, CURLOPT_PROXY, $proxy );
+			};
+			add_action( 'http_api_curl', $proxy_callback, 10, 1 );
+		}
+
 		$response = wp_remote_get( $url, $args );
+
+		if ( $proxy_callback ) {
+			remove_action( 'http_api_curl', $proxy_callback, 10 );
+		}
 
 		if ( is_wp_error( $response ) ) {
 			$error_message = $response->get_error_message();
@@ -264,12 +277,29 @@ class Insta_Scraper {
 			'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
 		);
 
-		$clean_sid = '';
+		$clean_cookie = '';
 		if ( ! empty( $session_id ) && 'paste_your_copied_session_id_here' !== trim( $session_id ) ) {
-			$clean_sid = trim( $session_id, "\"' \t\n\r\0\x0B;" );
-			if ( 0 === stripos( $clean_sid, 'sessionid=' ) ) {
-				$clean_sid = substr( $clean_sid, 10 );
+			$raw_clean = trim( $session_id, "\"' \t\n\r\0\x0B;" );
+			if ( false !== strpos( $raw_clean, '=' ) && false !== strpos( $raw_clean, ';' ) ) {
+				$clean_cookie = $raw_clean;
+			} else {
+				if ( 0 === stripos( $raw_clean, 'sessionid=' ) ) {
+					$raw_clean = substr( $raw_clean, 10 );
+				}
+				$clean_cookie = "sessionid={$raw_clean};";
+				if ( preg_match( '/^(\d+)[:%]/', $raw_clean, $uid_m ) ) {
+					$clean_cookie .= " ds_user_id={$uid_m[1]};";
+				}
 			}
+		}
+
+		$proxy = Insta_Admin::get_proxy();
+		$proxy_callback = null;
+		if ( ! empty( $proxy ) ) {
+			$proxy_callback = function( $handle ) use ( $proxy ) {
+				curl_setopt( $handle, CURLOPT_PROXY, $proxy );
+			};
+			add_action( 'http_api_curl', $proxy_callback, 10, 1 );
 		}
 
 		$response = null;
@@ -284,8 +314,8 @@ class Insta_Scraper {
 				'Accept-Language' => 'en-US,en;q=0.9',
 			);
 
-			if ( 0 === $index && ! empty( $clean_sid ) ) {
-				$headers['Cookie'] = "sessionid={$clean_sid};";
+			if ( 0 === $index && ! empty( $clean_cookie ) ) {
+				$headers['Cookie'] = $clean_cookie;
 			}
 
 			$args = apply_filters(
@@ -328,6 +358,10 @@ class Insta_Scraper {
 					);
 				}
 			}
+		}
+
+		if ( $proxy_callback ) {
+			remove_action( 'http_api_curl', $proxy_callback, 10 );
 		}
 
 		if ( empty( $html ) ) {
