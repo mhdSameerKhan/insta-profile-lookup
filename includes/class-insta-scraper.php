@@ -136,8 +136,8 @@ class Insta_Scraper {
 			$api_error = $result;
 		}
 
-		// 3. Attempt Strategy B: Server-rendered HTML scraper (passes session cookie if available)
-		$result = self::fetch_via_html_scraper( $username, $session_id );
+		// 3. Attempt Strategy B: Server-rendered HTML scraper
+		$result = self::fetch_via_html_scraper( $username );
 		if ( ! is_wp_error( $result ) && ! empty( $result ) ) {
 			Insta_Cache::set( $username, $result );
 			return $result;
@@ -259,16 +259,24 @@ class Insta_Scraper {
 			return new WP_Error( 'parse_error', 'Invalid API response structure', array( 'status' => 500 ) );
 		}
 
+		// Strictly verify the returned user matches the requested username
+		if ( ! empty( $json['data']['user']['username'] ) && strtolower( $json['data']['user']['username'] ) !== strtolower( $username ) ) {
+			return new WP_Error( 'user_mismatch', 'Instagram API returned data for an unexpected user.', array( 'status' => 500 ) );
+		}
+
 		return self::normalize_user_object( $json['data']['user'] );
 	}
 
 	/**
 	 * Fetch profile via public server-rendered HTML.
 	 *
+	 * Uses public crawler user agents (Facebook, Twitter, Googlebot) which receive
+	 * pristine, server-rendered profile HTML and media without authentication contamination.
+	 *
 	 * @param string $username
 	 * @return array|WP_Error
 	 */
-	private static function fetch_via_html_scraper( $username, $session_id = '' ) {
+	private static function fetch_via_html_scraper( $username ) {
 		$url = "https://www.instagram.com/{$username}/";
 
 		$user_agents = array(
@@ -276,22 +284,6 @@ class Insta_Scraper {
 			'Twitterbot/1.0',
 			'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
 		);
-
-		$clean_cookie = '';
-		if ( ! empty( $session_id ) && 'paste_your_copied_session_id_here' !== trim( $session_id ) ) {
-			$raw_clean = trim( $session_id, "\"' \t\n\r\0\x0B;" );
-			if ( false !== strpos( $raw_clean, '=' ) && false !== strpos( $raw_clean, ';' ) ) {
-				$clean_cookie = $raw_clean;
-			} else {
-				if ( 0 === stripos( $raw_clean, 'sessionid=' ) ) {
-					$raw_clean = substr( $raw_clean, 10 );
-				}
-				$clean_cookie = "sessionid={$raw_clean};";
-				if ( preg_match( '/^(\d+)[:%]/', $raw_clean, $uid_m ) ) {
-					$clean_cookie .= " ds_user_id={$uid_m[1]};";
-				}
-			}
-		}
 
 		$proxy = Insta_Admin::get_proxy();
 		$proxy_callback = null;
@@ -305,18 +297,14 @@ class Insta_Scraper {
 		$response = null;
 		$html     = '';
 
-		// Try crawlers in order. First attempt includes session cookie if provided.
-		// Subsequent attempts automatically drop the cookie to bypass challenged/expired sessions.
-		foreach ( $user_agents as $index => $ua ) {
+		// Try crawlers in order. Crawlers are strictly unauthenticated so Instagram returns
+		// the clean pre-rendered public profile and post grid without viewer account metadata.
+		foreach ( $user_agents as $ua ) {
 			$headers = array(
 				'User-Agent'      => $ua,
 				'Accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 				'Accept-Language' => 'en-US,en;q=0.9',
 			);
-
-			if ( 0 === $index && ! empty( $clean_cookie ) ) {
-				$headers['Cookie'] = $clean_cookie;
-			}
 
 			$args = apply_filters(
 				'insta_lookup_html_scraper_args',
@@ -383,6 +371,14 @@ class Insta_Scraper {
 					'upstream_rate_limited',
 					__( 'Instagram rate limit reached. Please wait a few moments.', 'insta-profile-lookup' ),
 					array( 'status' => 429 )
+				);
+			}
+
+			if ( $last_status >= 500 ) {
+				return new WP_Error(
+					'upstream_server_error',
+					__( 'Instagram service is temporarily unavailable. Please try again shortly.', 'insta-profile-lookup' ),
+					array( 'status' => 502 )
 				);
 			}
 
@@ -474,59 +470,49 @@ class Insta_Scraper {
 				$json           = json_decode( $inner, true );
 
 				if ( $json && is_array( $json ) ) {
-					// Try to find the specific user node matching our target username
+					// Strictly match the target username to avoid extracting the logged-in viewer's profile
 					$source = self::find_user_node( $json, $username );
-					if ( ! $source ) {
-						// Fallback: blind key extraction from entire JSON tree
-						$source = array();
-						self::extract_nested_keys(
-							$json,
-							array( 'full_name', 'biography', 'is_verified', 'is_private',
-								'profile_pic_url', 'profile_pic_url_hd', 'external_url',
-								'follower_count', 'following_count' ),
-							$source
-						);
-					}
-
-					if ( ! empty( $source['full_name'] ) ) {
-						$full_name = $source['full_name'];
-					}
-					if ( isset( $source['biography'] ) && ! empty( $source['biography'] ) ) {
-						$biography = $source['biography'];
-					}
-					if ( isset( $source['is_verified'] ) ) {
-						$is_verified = (bool) $source['is_verified'];
-					}
-					if ( isset( $source['is_private'] ) ) {
-						$is_private = (bool) $source['is_private'];
-					}
-					if ( ! empty( $source['profile_pic_url_hd'] ) ) {
-						$og_image = $source['profile_pic_url_hd'];
-					} elseif ( ! empty( $source['profile_pic_url'] ) && empty( $og_image ) ) {
-						$og_image = $source['profile_pic_url'];
-					}
-					if ( ! empty( $source['external_url'] ) ) {
-						$external_url = $source['external_url'];
-					}
-					if ( null === $followers_count ) {
-						if ( isset( $source['edge_followed_by']['count'] ) ) {
-							$followers_count = (int) $source['edge_followed_by']['count'];
-						} elseif ( isset( $source['follower_count'] ) ) {
-							$followers_count = (int) $source['follower_count'];
+					if ( $source ) {
+						if ( ! empty( $source['full_name'] ) ) {
+							$full_name = $source['full_name'];
 						}
-					}
-					if ( null === $following_count ) {
-						if ( isset( $source['edge_follow']['count'] ) ) {
-							$following_count = (int) $source['edge_follow']['count'];
-						} elseif ( isset( $source['following_count'] ) ) {
-							$following_count = (int) $source['following_count'];
+						if ( isset( $source['biography'] ) && ! empty( $source['biography'] ) ) {
+							$biography = $source['biography'];
 						}
-					}
-					if ( null === $posts_count ) {
-						if ( isset( $source['edge_owner_to_timeline_media']['count'] ) ) {
-							$posts_count = (int) $source['edge_owner_to_timeline_media']['count'];
-						} elseif ( isset( $source['media_count'] ) ) {
-							$posts_count = (int) $source['media_count'];
+						if ( isset( $source['is_verified'] ) ) {
+							$is_verified = (bool) $source['is_verified'];
+						}
+						if ( isset( $source['is_private'] ) ) {
+							$is_private = (bool) $source['is_private'];
+						}
+						if ( ! empty( $source['profile_pic_url_hd'] ) ) {
+							$og_image = $source['profile_pic_url_hd'];
+						} elseif ( ! empty( $source['profile_pic_url'] ) && empty( $og_image ) ) {
+							$og_image = $source['profile_pic_url'];
+						}
+						if ( ! empty( $source['external_url'] ) ) {
+							$external_url = $source['external_url'];
+						}
+						if ( null === $followers_count ) {
+							if ( isset( $source['edge_followed_by']['count'] ) ) {
+								$followers_count = (int) $source['edge_followed_by']['count'];
+							} elseif ( isset( $source['follower_count'] ) ) {
+								$followers_count = (int) $source['follower_count'];
+							}
+						}
+						if ( null === $following_count ) {
+							if ( isset( $source['edge_follow']['count'] ) ) {
+								$following_count = (int) $source['edge_follow']['count'];
+							} elseif ( isset( $source['following_count'] ) ) {
+								$following_count = (int) $source['following_count'];
+							}
+						}
+						if ( null === $posts_count ) {
+							if ( isset( $source['edge_owner_to_timeline_media']['count'] ) ) {
+								$posts_count = (int) $source['edge_owner_to_timeline_media']['count'];
+							} elseif ( isset( $source['media_count'] ) ) {
+								$posts_count = (int) $source['media_count'];
+							}
 						}
 					}
 				}
