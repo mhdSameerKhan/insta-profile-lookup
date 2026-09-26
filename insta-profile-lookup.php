@@ -1,12 +1,13 @@
 <?php
 /**
  * Plugin Name:       Instagram Public Profile Lookup V2
- * Plugin URI:        https://github.com/sameer/insta-profile-lookup
+ * Plugin URI:        https://github.com/mhdSameerKhan/insta-profile-lookup
  * Description:       Look up public Instagram profile stats, metadata, and recent posts without requiring authentication or full page reloads.
  * Version:           1.0.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Sameer
+ * Author URI:        https://github.com/mhdSameerKhan
  * License:           GPL-2.0-or-later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       insta-profile-lookup
