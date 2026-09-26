@@ -258,81 +258,105 @@ class Insta_Scraper {
 	private static function fetch_via_html_scraper( $username, $session_id = '' ) {
 		$url = "https://www.instagram.com/{$username}/";
 
-		$headers = array(
-			'User-Agent'      => self::BOT_USER_AGENT,
-			'Accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-			'Accept-Language' => 'en-US,en;q=0.9',
+		$user_agents = array(
+			'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+			'Twitterbot/1.0',
+			'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
 		);
 
-		// If a session ID is available, pass it in cookie, but DO NOT switch User-Agent to desktop browser.
-		// Instagram ONLY serves pre-rendered OpenGraph metadata to crawler / bot user agents.
+		$clean_sid = '';
 		if ( ! empty( $session_id ) && 'paste_your_copied_session_id_here' !== trim( $session_id ) ) {
 			$clean_sid = trim( $session_id, "\"' \t\n\r\0\x0B;" );
 			if ( 0 === stripos( $clean_sid, 'sessionid=' ) ) {
 				$clean_sid = substr( $clean_sid, 10 );
 			}
-			$headers['Cookie'] = "sessionid={$clean_sid};";
 		}
 
-		$args = apply_filters(
-			'insta_lookup_html_scraper_args',
-			array(
-				'headers'   => $headers,
-				'timeout'   => 15,
-				'sslverify' => true,
-			),
-			$username
-		);
+		$response = null;
+		$html     = '';
 
-		$response = wp_remote_get( $url, $args );
-
-		// If rate-limited (429), retry once with Facebook external crawler UA which has high trust
-		if ( ! is_wp_error( $response ) && 429 === (int) wp_remote_retrieve_response_code( $response ) ) {
-			$headers['User-Agent'] = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
-			$args['headers']       = $headers;
-			$response              = wp_remote_get( $url, $args );
-		}
-
-		if ( is_wp_error( $response ) ) {
-			$error_message = $response->get_error_message();
-			$is_timeout    = false !== stripos( $error_message, 'timed out' ) || false !== stripos( $error_message, 'timeout' );
-			return new WP_Error(
-				$is_timeout ? 'upstream_timeout' : 'upstream_connection_failed',
-				$is_timeout
-					? __( 'Connection to Instagram timed out. Please try again.', 'insta-profile-lookup' )
-					: sprintf( __( 'Could not connect to Instagram: %s', 'insta-profile-lookup' ), $error_message ),
-				array( 'status' => $is_timeout ? 504 : 502 )
+		// Try crawlers in order. First attempt includes session cookie if provided.
+		// Subsequent attempts automatically drop the cookie to bypass challenged/expired sessions.
+		foreach ( $user_agents as $index => $ua ) {
+			$headers = array(
+				'User-Agent'      => $ua,
+				'Accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+				'Accept-Language' => 'en-US,en;q=0.9',
 			);
+
+			if ( 0 === $index && ! empty( $clean_sid ) ) {
+				$headers['Cookie'] = "sessionid={$clean_sid};";
+			}
+
+			$args = apply_filters(
+				'insta_lookup_html_scraper_args',
+				array(
+					'headers'   => $headers,
+					'timeout'   => 15,
+					'sslverify' => true,
+				),
+				$username
+			);
+
+			$response = wp_remote_get( $url, $args );
+
+			if ( is_wp_error( $response ) ) {
+				continue;
+			}
+
+			$status = (int) wp_remote_retrieve_response_code( $response );
+			if ( 200 === $status ) {
+				$candidate_html = wp_remote_retrieve_body( $response );
+				if ( ! empty( $candidate_html ) &&
+					( false !== stripos( $candidate_html, 'og:description' ) ||
+					  false !== stripos( $candidate_html, 'name="description"' ) ||
+					  false !== stripos( $candidate_html, "@{$username}" ) ||
+					  false !== stripos( $candidate_html, "&#064;{$username}" ) ) ) {
+					$html = $candidate_html;
+					break;
+				}
+			}
+
+			if ( 404 === $status ) {
+				$candidate_html = wp_remote_retrieve_body( $response );
+				if ( false !== stripos( $candidate_html, "Sorry, this page isn't available" ) ||
+					 false !== stripos( $candidate_html, 'The link you followed may be broken' ) ) {
+					return new WP_Error(
+						'user_not_found',
+						sprintf( __( 'Instagram user "@%s" could not be found.', 'insta-profile-lookup' ), $username ),
+						array( 'status' => 404 )
+					);
+				}
+			}
 		}
 
-		$status = wp_remote_retrieve_response_code( $response );
-		if ( 404 === $status ) {
+		if ( empty( $html ) ) {
+			if ( is_wp_error( $response ) ) {
+				$error_message = $response->get_error_message();
+				$is_timeout    = false !== stripos( $error_message, 'timed out' ) || false !== stripos( $error_message, 'timeout' );
+				return new WP_Error(
+					$is_timeout ? 'upstream_timeout' : 'upstream_connection_failed',
+					$is_timeout
+						? __( 'Connection to Instagram timed out. Please try again.', 'insta-profile-lookup' )
+						: sprintf( __( 'Could not connect to Instagram: %s', 'insta-profile-lookup' ), $error_message ),
+					array( 'status' => $is_timeout ? 504 : 502 )
+				);
+			}
+
+			$last_status = ! empty( $response ) ? (int) wp_remote_retrieve_response_code( $response ) : 500;
+			if ( 429 === $last_status ) {
+				return new WP_Error(
+					'upstream_rate_limited',
+					__( 'Instagram rate limit reached. Please wait a few moments.', 'insta-profile-lookup' ),
+					array( 'status' => 429 )
+				);
+			}
+
 			return new WP_Error(
 				'user_not_found',
 				sprintf( __( 'Instagram user "@%s" could not be found.', 'insta-profile-lookup' ), $username ),
 				array( 'status' => 404 )
 			);
-		}
-
-		if ( 429 === $status ) {
-			return new WP_Error(
-				'upstream_rate_limited',
-				__( 'Instagram rate limit reached. Please wait a few moments or configure a session ID in settings.', 'insta-profile-lookup' ),
-				array( 'status' => 429 )
-			);
-		}
-
-		if ( $status >= 500 ) {
-			return new WP_Error(
-				'upstream_server_error',
-				__( 'Instagram service is temporarily unavailable. Please try again shortly.', 'insta-profile-lookup' ),
-				array( 'status' => 502 )
-			);
-		}
-
-		$html = wp_remote_retrieve_body( $response );
-		if ( empty( $html ) ) {
-			return new WP_Error( 'empty_response', 'Empty response from Instagram', array( 'status' => 500 ) );
 		}
 
 		// Check for profile not found indicators
