@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name:       Instagram Public Profile Lookup
+ * Plugin Name:       Instagram Public Profile Lookup V2
  * Plugin URI:        https://github.com/sameer/insta-profile-lookup
  * Description:       Look up public Instagram profile stats, metadata, and recent posts without requiring authentication or full page reloads.
  * Version:           1.0.0

@@ -1,4 +1,4 @@
-# Instagram Public Profile Lookup (WordPress Plugin)
+# Instagram Public Profile Lookup V2 (WordPress Plugin)
 
 [![WordPress 5.8+](https://img.shields.io/badge/WordPress-5.8%2B-blue.svg)](https://wordpress.org)
 [![PHP 7.4+](https://img.shields.io/badge/PHP-7.4%2B-purple.svg)](https://php.net)

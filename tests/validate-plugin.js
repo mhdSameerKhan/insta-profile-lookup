@@ -36,7 +36,7 @@ files.forEach(f => {
 // 2. Check WordPress Plugin Headers in main file
 const mainPluginContent = fs.readFileSync(path.join(pluginRoot, 'insta-profile-lookup.php'), 'utf8');
 const expectedHeaders = [
-  'Plugin Name:       Instagram Public Profile Lookup',
+  'Plugin Name:       Instagram Public Profile Lookup V2',
   'Version:           1.0.0',
   'Requires at least: 5.8',
   'Requires PHP:      7.4',
@@ -119,9 +119,9 @@ try {
 }
 
 // 7. Verify Distribution Zip Package
-const zipPath = path.join(pluginRoot, 'insta-profile-lookup.zip');
+const zipPath = path.join(pluginRoot, 'insta-profile-lookup-v2.zip');
 if (!fs.existsSync(zipPath)) {
-  errors.push('Installable zip file does not exist: insta-profile-lookup.zip');
+  errors.push('Installable zip file does not exist: insta-profile-lookup-v2.zip');
 }
 
 if (errors.length > 0) {

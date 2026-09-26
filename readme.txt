@@ -1,4 +1,4 @@
-=== Instagram Public Profile Lookup ===
+=== Instagram Public Profile Lookup V2 ===
 Contributors: sameer
 Donate link: https://github.com/sameer/insta-profile-lookup
 Tags: instagram, profile, lookup, social media, scraper
