@@ -392,9 +392,9 @@ class Insta_Scraper {
 
 		// User agents to try in order — crawler UAs get pre-rendered HTML with og tags
 		$user_agents = array(
+			'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
 			'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
 			'Twitterbot/1.0',
-			'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
 		);
 
 		$clean_cookie = '';
