@@ -136,8 +136,8 @@ class Insta_Scraper {
 			$api_error = $result;
 		}
 
-		// 3. Attempt Strategy B: Server-rendered HTML scraper
-		$result = self::fetch_via_html_scraper( $username );
+		// 3. Attempt Strategy B: Server-rendered HTML scraper (passes session_id if available to bypass datacenter IP blocks)
+		$result = self::fetch_via_html_scraper( $username, $session_id );
 		if ( ! is_wp_error( $result ) && ! empty( $result ) ) {
 			Insta_Cache::set( $username, $result );
 			return $result;
@@ -276,7 +276,7 @@ class Insta_Scraper {
 	 * @param string $username
 	 * @return array|WP_Error
 	 */
-	private static function fetch_via_html_scraper( $username ) {
+	private static function fetch_via_html_scraper( $username, $session_id = '' ) {
 		$url = "https://www.instagram.com/{$username}/";
 
 		$user_agents = array(
@@ -284,6 +284,22 @@ class Insta_Scraper {
 			'Twitterbot/1.0',
 			'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
 		);
+
+		$clean_cookie = '';
+		if ( ! empty( $session_id ) && 'paste_your_copied_session_id_here' !== trim( $session_id ) ) {
+			$raw_clean = trim( $session_id, "\"' \t\n\r\0\x0B;" );
+			if ( false !== strpos( $raw_clean, '=' ) && false !== strpos( $raw_clean, ';' ) ) {
+				$clean_cookie = $raw_clean;
+			} else {
+				if ( 0 === stripos( $raw_clean, 'sessionid=' ) ) {
+					$raw_clean = substr( $raw_clean, 10 );
+				}
+				$clean_cookie = "sessionid={$raw_clean};";
+				if ( preg_match( '/^(\d+)[:%]/', $raw_clean, $uid_m ) ) {
+					$clean_cookie .= " ds_user_id={$uid_m[1]};";
+				}
+			}
+		}
 
 		$proxy = Insta_Admin::get_proxy();
 		$proxy_callback = null;
@@ -297,14 +313,18 @@ class Insta_Scraper {
 		$response = null;
 		$html     = '';
 
-		// Try crawlers in order. Crawlers are strictly unauthenticated so Instagram returns
-		// the clean pre-rendered public profile and post grid without viewer account metadata.
-		foreach ( $user_agents as $ua ) {
+		// Try crawlers in order. If session cookie is provided, pass it on the first attempt
+		// to bypass datacenter IP rate limits (HTTP 429) while preserving target profile data.
+		foreach ( $user_agents as $index => $ua ) {
 			$headers = array(
 				'User-Agent'      => $ua,
 				'Accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 				'Accept-Language' => 'en-US,en;q=0.9',
 			);
+
+			if ( 0 === $index && ! empty( $clean_cookie ) ) {
+				$headers['Cookie'] = $clean_cookie;
+			}
 
 			$args = apply_filters(
 				'insta_lookup_html_scraper_args',
@@ -435,7 +455,8 @@ class Insta_Scraper {
 		// Parse Display Name from og:title or <title> tag
 		$full_name = '';
 		if ( ! empty( $og_title ) ) {
-			if ( preg_match( '/^(.*?)\s*\(@/i', $og_title, $nm ) ) {
+			$dec_og_title = html_entity_decode( $og_title, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+			if ( preg_match( '/^(.*?)\s*\(@/i', $dec_og_title, $nm ) ) {
 				$full_name = trim( $nm[1] );
 			}
 		}
