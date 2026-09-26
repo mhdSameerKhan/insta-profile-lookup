@@ -133,10 +133,6 @@ class Insta_Scraper {
 				Insta_Cache::set( $username, $result );
 				return $result;
 			}
-			// If web API definitively confirmed user does not exist, return immediately
-			if ( is_wp_error( $result ) && 'user_not_found' === $result->get_error_code() ) {
-				return $result;
-			}
 			$api_error = $result;
 		}
 
@@ -268,14 +264,14 @@ class Insta_Scraper {
 			'Accept-Language' => 'en-US,en;q=0.9',
 		);
 
-		// If a session ID is available, pass it to the HTML scraper and switch to browser user agent
+		// If a session ID is available, pass it in cookie, but DO NOT switch User-Agent to desktop browser.
+		// Instagram ONLY serves pre-rendered OpenGraph metadata to crawler / bot user agents.
 		if ( ! empty( $session_id ) && 'paste_your_copied_session_id_here' !== trim( $session_id ) ) {
 			$clean_sid = trim( $session_id, "\"' \t\n\r\0\x0B;" );
 			if ( 0 === stripos( $clean_sid, 'sessionid=' ) ) {
 				$clean_sid = substr( $clean_sid, 10 );
 			}
-			$headers['Cookie']     = "sessionid={$clean_sid};";
-			$headers['User-Agent'] = self::BROWSER_USER_AGENT;
+			$headers['Cookie'] = "sessionid={$clean_sid};";
 		}
 
 		$args = apply_filters(
@@ -289,6 +285,13 @@ class Insta_Scraper {
 		);
 
 		$response = wp_remote_get( $url, $args );
+
+		// If rate-limited (429), retry once with Facebook external crawler UA which has high trust
+		if ( ! is_wp_error( $response ) && 429 === (int) wp_remote_retrieve_response_code( $response ) ) {
+			$headers['User-Agent'] = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
+			$args['headers']       = $headers;
+			$response              = wp_remote_get( $url, $args );
+		}
 
 		if ( is_wp_error( $response ) ) {
 			$error_message = $response->get_error_message();
@@ -342,14 +345,20 @@ class Insta_Scraper {
 			);
 		}
 
-		// Extract OpenGraph and Meta tags (resilient to attribute ordering, quote styles, and entities)
-		$og_desc = self::extract_meta_tag( $html, 'og:description' );
-		if ( empty( $og_desc ) ) {
-			$og_desc = self::extract_meta_tag( $html, 'description' );
-		}
+		// Extract OpenGraph and Meta tags (tag-bounded, resilient to attribute ordering, quote styles, and entities)
+		$og_desc   = self::extract_meta_tag( $html, 'og:description' );
+		$meta_desc = self::extract_meta_tag( $html, 'description' );
+		$og_title  = self::extract_meta_tag( $html, 'og:title' );
+		$og_image  = self::extract_meta_tag( $html, 'og:image' );
 
-		// If no description and no handle mention, profile does not exist
-		if ( empty( $og_desc ) && ! preg_match( "/@{$username}/i", $html ) ) {
+		// Decode entities for accurate handle and string matching
+		$decoded_html = html_entity_decode( $html, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		$esc_user     = preg_quote( $username, '/' );
+		$handle_found = preg_match( "/(?:@|&#064;){$esc_user}\\b/i", $html ) ||
+		                preg_match( "/@{$esc_user}\\b/i", $decoded_html );
+
+		// If no description meta tags and no handle mention anywhere, the user does not exist
+		if ( empty( $og_desc ) && empty( $meta_desc ) && ! $handle_found ) {
 			return new WP_Error(
 				'user_not_found',
 				sprintf( __( 'Instagram user "@%s" could not be found.', 'insta-profile-lookup' ), $username ),
@@ -357,36 +366,40 @@ class Insta_Scraper {
 			);
 		}
 
-		$og_title = self::extract_meta_tag( $html, 'og:title' );
-		if ( empty( $og_title ) ) {
-			$og_title = self::extract_meta_tag( $html, 'title' );
-		}
-
-		$og_image = self::extract_meta_tag( $html, 'og:image' );
-
 		// Parse Followers, Following, and Posts from description
-		// Format: "269M Followers, 195 Following, 32K Posts - See Instagram photos and videos from National Geographic (@natgeo)"
-		// Handles plural & singular ("1 Follower", "0 Following", "1 Post")
 		$followers_count = null;
 		$following_count = null;
 		$posts_count     = null;
 
-		if ( preg_match( '/([0-9.,]+[KMB]?)\s*Followers?,\s*([0-9.,]+[KMB]?)\s*Following,\s*([0-9.,]+[KMB]?)\s*Posts?/i', $og_desc, $stats_m ) ) {
+		$stats_source = ! empty( $og_desc ) ? $og_desc : $meta_desc;
+		if ( preg_match( '/([0-9.,]+[KMB]?)\s*Followers?,\s*([0-9.,]+[KMB]?)\s*Following,\s*([0-9.,]+[KMB]?)\s*Posts?/i', $stats_source, $stats_m ) ) {
 			$followers_count = self::parse_abbreviated_number( $stats_m[1] );
 			$following_count = self::parse_abbreviated_number( $stats_m[2] );
 			$posts_count     = self::parse_abbreviated_number( $stats_m[3] );
 		}
 
-		// Parse Display Name from og:title (e.g., "National Geographic (@natgeo) • Instagram photos and videos")
+		// Parse Display Name from og:title or <title> tag
 		$full_name = '';
 		if ( ! empty( $og_title ) ) {
 			if ( preg_match( '/^(.*?)\s*\(@/i', $og_title, $nm ) ) {
 				$full_name = trim( $nm[1] );
 			}
 		}
+		if ( empty( $full_name ) && preg_match( '/<title[^>]*>(.*?)<\/title>/is', $html, $t_m ) ) {
+			$dec_title = html_entity_decode( $t_m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+			if ( preg_match( '/^(.*?)\s*\(@/i', $dec_title, $nm ) ) {
+				$full_name = trim( $nm[1] );
+			}
+		}
+
+		// Parse Bio from meta description: National Geographic (@natgeo) on Instagram: "..."
+		$biography  = '';
+		$bio_source = ! empty( $meta_desc ) ? $meta_desc : $og_desc;
+		if ( preg_match( '/on Instagram:\s*"(.*?)"/is', $bio_source, $bio_m ) ) {
+			$biography = trim( $bio_m[1] );
+		}
 
 		// Try to extract rich JSON embedded in script tags
-		$biography    = '';
 		$is_verified  = false;
 		$is_private   = false;
 		$external_url = '';
@@ -404,7 +417,6 @@ class Insta_Scraper {
 
 				if ( $json && is_array( $json ) ) {
 					// Try to find the specific user node matching our target username
-					// to avoid extracting data from unrelated entities (comments, suggestions)
 					$source = self::find_user_node( $json, $username );
 					if ( ! $source ) {
 						// Fallback: blind key extraction from entire JSON tree
@@ -421,7 +433,7 @@ class Insta_Scraper {
 					if ( ! empty( $source['full_name'] ) ) {
 						$full_name = $source['full_name'];
 					}
-					if ( isset( $source['biography'] ) ) {
+					if ( isset( $source['biography'] ) && ! empty( $source['biography'] ) ) {
 						$biography = $source['biography'];
 					}
 					if ( isset( $source['is_verified'] ) ) {
@@ -460,13 +472,6 @@ class Insta_Scraper {
 						}
 					}
 				}
-			}
-		}
-
-		// Fallback for bio from meta description if bio wasn't in JSON
-		if ( empty( $biography ) && ! empty( $og_desc ) ) {
-			if ( preg_match( '/on Instagram:\s*"(.*?)"/is', $og_desc, $bio_m ) ) {
-				$biography = trim( $bio_m[1] );
 			}
 		}
 
@@ -514,29 +519,26 @@ class Insta_Scraper {
 	private static function extract_media_items( $html, $username ) {
 		$items = array();
 
-		// Strategy 1: Search for POLARIS_ media objects in JSON
-		if ( preg_match_all( '/\{[^{}]*"id":"POLARIS_(\d+)"[^{}]*\}/i', $html, $m_nodes ) ) {
-			foreach ( $m_nodes[0] as $node_str ) {
-				$m_data = json_decode( $node_str, true );
-				if ( ! empty( $m_data['id'] ) ) {
-					$raw_id = str_replace( 'POLARIS_', '', $m_data['id'] );
-					$code   = self::media_id_to_shortcode( $raw_id );
-					if ( ! empty( $code ) ) {
-						$items[ $raw_id ] = array(
-							'id'        => $raw_id,
-							'shortcode' => $code,
-							'url'       => "https://www.instagram.com/p/{$code}/",
-							'thumbnail' => '',
-							'caption'   => '',
-							'is_video'  => isset( $m_data['media_type'] ) && 2 === (int) $m_data['media_type'],
-						);
-					}
-				}
+		// Strategy 1: Find POLARIS pk nodes in JSON
+		if ( preg_match_all( '/"pk":"(\d+)"[^{}]*"image_versions2":\{"candidates":\[\{[^{}]*"url":"([^"]+)"/i', $html, $pk_matches, PREG_SET_ORDER ) ) {
+			foreach ( $pk_matches as $m ) {
+				$pk        = $m[1];
+				$raw_url   = str_replace( '\/', '/', $m[2] );
+				$url       = html_entity_decode( $raw_url, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+				$shortcode = self::media_id_to_shortcode( $pk );
+				$items[ $pk ] = array(
+					'id'        => $pk,
+					'shortcode' => $shortcode,
+					'url'       => ! empty( $shortcode ) ? "https://www.instagram.com/p/{$shortcode}/" : "https://www.instagram.com/{$username}/",
+					'thumbnail' => $url,
+					'caption'   => '',
+					'is_video'  => false,
+				);
 			}
 		}
 
 		// Strategy 2: Extract from <img> tags in the HTML
-		preg_match_all( '/<img\s+[^>]*src="([^"]+)"[^>]*>/is', $html, $img_tags );
+		preg_match_all( '/<img\s+[^>]*src=["\']([^"\']+)["\'][^>]*>/is', $html, $img_tags );
 		if ( ! empty( $img_tags[0] ) ) {
 			foreach ( $img_tags[0] as $tag ) {
 				// Skip profile picture
@@ -545,7 +547,7 @@ class Insta_Scraper {
 				}
 
 				// Extract src
-				if ( ! preg_match( '/src="([^"]+)"/i', $tag, $src_m ) ) {
+				if ( ! preg_match( '/src=["\']([^"\']+)["\']/i', $tag, $src_m ) ) {
 					continue;
 				}
 				$src = html_entity_decode( $src_m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
@@ -557,7 +559,7 @@ class Insta_Scraper {
 
 				// Extract caption from alt
 				$caption = '';
-				if ( preg_match( '/alt="([^"]*)"/is', $tag, $alt_m ) ) {
+				if ( preg_match( '/alt=["\']([^"\']*)["\']/is', $tag, $alt_m ) ) {
 					$caption = html_entity_decode( $alt_m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 				}
 
@@ -580,8 +582,12 @@ class Insta_Scraper {
 				}
 
 				if ( isset( $items[ $item_id ] ) ) {
-					$items[ $item_id ]['thumbnail'] = $src;
-					$items[ $item_id ]['caption']   = $caption;
+					if ( empty( $items[ $item_id ]['thumbnail'] ) ) {
+						$items[ $item_id ]['thumbnail'] = $src;
+					}
+					if ( empty( $items[ $item_id ]['caption'] ) ) {
+						$items[ $item_id ]['caption'] = $caption;
+					}
 				} else {
 					$items[ $item_id ] = array(
 						'id'        => $item_id,
@@ -794,14 +800,15 @@ class Insta_Scraper {
 	public static function extract_meta_tag( $html, $name_or_property ) {
 		$esc = preg_quote( $name_or_property, '/' );
 
-		// Order 1: property|name before content
-		if ( preg_match( '/<meta\s+[^>]*?(?:property|name)=["\']' . $esc . '["\'][^>]*?content=(["\'])(.*?)\1/is', $html, $m ) ) {
-			return html_entity_decode( $m[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-		}
-
-		// Order 2: content before property|name
-		if ( preg_match( '/<meta\s+[^>]*?content=(["\'])(.*?)\1[^>]*?(?:property|name)=["\']' . $esc . '["\']/is', $html, $m ) ) {
-			return html_entity_decode( $m[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		// Tag-bounded extraction: match each <meta ...> tag individually without crossing tag boundaries
+		if ( preg_match_all( '/<meta\s+([^>]+)>/i', $html, $matches ) ) {
+			foreach ( $matches[1] as $tag_content ) {
+				if ( preg_match( '/(?:name|property)=["\']' . $esc . '["\']/i', $tag_content ) ) {
+					if ( preg_match( '/content=(["\'])(.*?)\1/is', $tag_content, $cm ) ) {
+						return html_entity_decode( $cm[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+					}
+				}
+			}
 		}
 
 		return '';
