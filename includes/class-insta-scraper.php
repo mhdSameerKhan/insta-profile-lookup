@@ -24,10 +24,9 @@ class Insta_Scraper {
 	const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 	/**
-	 * Instagram Web App ID defaults.
+	 * Instagram Web App ID.
 	 */
 	const DEFAULT_IG_APP_ID = '936619743392459';
-	const IG_APP_ID         = '936619743392459'; // For backward compatibility
 
 	/**
 	 * Get the active Instagram App ID. Allows override via constant or filter.
@@ -54,8 +53,6 @@ class Insta_Scraper {
 		}
 
 		$input = trim( $input );
-
-		// Remove leading/trailing slashes
 		$input = trim( $input, '/' );
 
 		// If input is a URL, parse path (including stories/ links)
@@ -71,8 +68,6 @@ class Insta_Scraper {
 
 		// Remove leading @
 		$input = ltrim( $input, '@' );
-
-		// Trim whitespace again
 		$input = trim( $input );
 
 		// Reserved paths on instagram.com that are not usernames
@@ -91,6 +86,12 @@ class Insta_Scraper {
 
 	/**
 	 * Fetch and parse Instagram profile data.
+	 *
+	 * Strategy chain:
+	 * 1. Check cache
+	 * 2. Try authenticated Web API (requires session ID)
+	 * 3. Try HTML scraper with crawler UA + session cookie
+	 * 4. Return best error
 	 *
 	 * @param string $raw_username
 	 * @param bool   $skip_cache
@@ -114,16 +115,15 @@ class Insta_Scraper {
 			}
 		}
 
-		// 2. Attempt Strategy A: Session Cookie if provided
+		// 2. Attempt Strategy A: Authenticated Web API (if session ID is configured)
 		$session_id = Insta_Admin::get_session_id();
 		$api_error  = null;
 
 		if ( ! empty( $session_id ) ) {
-			// Check for literal placeholder string
 			if ( 'paste_your_copied_session_id_here' === trim( $session_id ) ) {
 				return new WP_Error(
 					'placeholder_session_id',
-					__( 'Placeholder session ID detected in wp-config.php. Please replace "paste_your_copied_session_id_here" with your actual Instagram session cookie value.', 'insta-profile-lookup' ),
+					__( 'Placeholder session ID detected. Please replace with your actual Instagram session cookie value.', 'insta-profile-lookup' ),
 					array( 'status' => 400 )
 				);
 			}
@@ -136,22 +136,21 @@ class Insta_Scraper {
 			$api_error = $result;
 		}
 
-		// 3. Attempt Strategy B: Server-rendered HTML scraper (passes session_id if available to bypass datacenter IP blocks)
+		// 3. Attempt Strategy B: HTML scraper with crawler UA (+ session cookie to bypass datacenter 429)
 		$result = self::fetch_via_html_scraper( $username, $session_id );
 		if ( ! is_wp_error( $result ) && ! empty( $result ) ) {
 			Insta_Cache::set( $username, $result );
 			return $result;
 		}
 
-		// If HTML scraper returned a specific error (e.g., 404 user not found), return it
+		// Return the most informative error
 		if ( is_wp_error( $result ) ) {
-			// If a session ID was provided but both strategies failed, provide informative diagnostic message
 			if ( ! empty( $session_id ) && 'upstream_rate_limited' === $result->get_error_code() ) {
 				$detail = is_wp_error( $api_error ) ? ' (' . $api_error->get_error_message() . ')' : '';
 				return new WP_Error(
 					'session_rejected_or_expired',
 					sprintf(
-						__( 'Instagram rejected the session%s. Your Instagram session ID may be expired, invalid, or requires a fresh login. Please check or regenerate your session ID.', 'insta-profile-lookup' ),
+						__( 'Instagram rejected the session%s. Your session ID may be expired or invalid. Please regenerate it.', 'insta-profile-lookup' ),
 						$detail
 					),
 					array( 'status' => 401 )
@@ -177,18 +176,7 @@ class Insta_Scraper {
 	private static function fetch_via_web_api( $username, $session_id ) {
 		$url = "https://www.instagram.com/api/v1/users/web_profile_info/?username={$username}";
 
-		// Clean up session ID format (strip quotes, spaces, or leading 'sessionid=')
-		$clean_sid = trim( $session_id, "\"' \t\n\r\0\x0B;" );
-		if ( 0 === stripos( $clean_sid, 'sessionid=' ) ) {
-			$clean_sid = substr( $clean_sid, 10 );
-		}
-
-		$cookie_header = "sessionid={$clean_sid};";
-
-		// Extract ds_user_id from session ID (format: {user_id}%3A...)
-		if ( preg_match( '/^(\d+)[:%]/', $clean_sid, $uid_m ) ) {
-			$cookie_header .= " ds_user_id={$uid_m[1]};";
-		}
+		$clean_sid = self::build_session_cookie( $session_id );
 
 		$headers = array(
 			'User-Agent'         => self::BROWSER_USER_AGENT,
@@ -199,7 +187,7 @@ class Insta_Scraper {
 			'Accept'             => '*/*',
 			'Accept-Language'    => 'en-US,en;q=0.9',
 			'Referer'            => "https://www.instagram.com/{$username}/",
-			'Cookie'             => $cookie_header,
+			'Cookie'             => $clean_sid,
 		);
 
 		$args = apply_filters(
@@ -248,6 +236,10 @@ class Insta_Scraper {
 			);
 		}
 
+		if ( 429 === $status ) {
+			return new WP_Error( 'upstream_rate_limited', 'Instagram Web API returned HTTP 429', array( 'status' => 429 ) );
+		}
+
 		if ( 200 !== $status ) {
 			return new WP_Error( 'api_error', "Instagram Web API returned HTTP {$status}", array( 'status' => $status ) );
 		}
@@ -270,15 +262,18 @@ class Insta_Scraper {
 	/**
 	 * Fetch profile via public server-rendered HTML.
 	 *
-	 * Uses public crawler user agents (Facebook, Twitter, Googlebot) which receive
-	 * pristine, server-rendered profile HTML and media without authentication contamination.
+	 * Uses crawler user agents which receive server-rendered HTML with OpenGraph meta tags
+	 * and embedded JSON data. Session cookie is included to bypass datacenter IP rate limits
+	 * but all extracted data is strictly validated against the target username.
 	 *
 	 * @param string $username
+	 * @param string $session_id Optional session cookie for bypassing rate limits.
 	 * @return array|WP_Error
 	 */
 	private static function fetch_via_html_scraper( $username, $session_id = '' ) {
 		$url = "https://www.instagram.com/{$username}/";
 
+		// User agents to try in order — crawler UAs get pre-rendered HTML with og tags
 		$user_agents = array(
 			'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
 			'Twitterbot/1.0',
@@ -287,18 +282,7 @@ class Insta_Scraper {
 
 		$clean_cookie = '';
 		if ( ! empty( $session_id ) && 'paste_your_copied_session_id_here' !== trim( $session_id ) ) {
-			$raw_clean = trim( $session_id, "\"' \t\n\r\0\x0B;" );
-			if ( false !== strpos( $raw_clean, '=' ) && false !== strpos( $raw_clean, ';' ) ) {
-				$clean_cookie = $raw_clean;
-			} else {
-				if ( 0 === stripos( $raw_clean, 'sessionid=' ) ) {
-					$raw_clean = substr( $raw_clean, 10 );
-				}
-				$clean_cookie = "sessionid={$raw_clean};";
-				if ( preg_match( '/^(\d+)[:%]/', $raw_clean, $uid_m ) ) {
-					$clean_cookie .= " ds_user_id={$uid_m[1]};";
-				}
-			}
+			$clean_cookie = self::build_session_cookie( $session_id );
 		}
 
 		$proxy = Insta_Admin::get_proxy();
@@ -313,16 +297,15 @@ class Insta_Scraper {
 		$response = null;
 		$html     = '';
 
-		// Try crawlers in order. If session cookie is provided, pass it on the first attempt
-		// to bypass datacenter IP rate limits (HTTP 429) while preserving target profile data.
-		foreach ( $user_agents as $index => $ua ) {
+		// Try crawler UAs. Include session cookie on all attempts to bypass datacenter 429.
+		foreach ( $user_agents as $ua ) {
 			$headers = array(
 				'User-Agent'      => $ua,
 				'Accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 				'Accept-Language' => 'en-US,en;q=0.9',
 			);
 
-			if ( 0 === $index && ! empty( $clean_cookie ) ) {
+			if ( ! empty( $clean_cookie ) ) {
 				$headers['Cookie'] = $clean_cookie;
 			}
 
@@ -359,6 +342,9 @@ class Insta_Scraper {
 				$candidate_html = wp_remote_retrieve_body( $response );
 				if ( false !== stripos( $candidate_html, "Sorry, this page isn't available" ) ||
 					 false !== stripos( $candidate_html, 'The link you followed may be broken' ) ) {
+					if ( $proxy_callback ) {
+						remove_action( 'http_api_curl', $proxy_callback, 10 );
+					}
 					return new WP_Error(
 						'user_not_found',
 						sprintf( __( 'Instagram user "@%s" could not be found.', 'insta-profile-lookup' ), $username ),
@@ -419,7 +405,9 @@ class Insta_Scraper {
 			);
 		}
 
-		// Extract OpenGraph and Meta tags (tag-bounded, resilient to attribute ordering, quote styles, and entities)
+		// -----------------------------------------------------------------------
+		// PHASE 1: Extract OpenGraph and Meta tags
+		// -----------------------------------------------------------------------
 		$og_desc   = self::extract_meta_tag( $html, 'og:description' );
 		$meta_desc = self::extract_meta_tag( $html, 'description' );
 		$og_title  = self::extract_meta_tag( $html, 'og:title' );
@@ -440,7 +428,9 @@ class Insta_Scraper {
 			);
 		}
 
-		// Parse Followers, Following, and Posts from description
+		// -----------------------------------------------------------------------
+		// PHASE 2: Parse Followers, Following, and Posts from description
+		// -----------------------------------------------------------------------
 		$followers_count = null;
 		$following_count = null;
 		$posts_count     = null;
@@ -452,7 +442,9 @@ class Insta_Scraper {
 			$posts_count     = self::parse_abbreviated_number( $stats_m[3] );
 		}
 
-		// Parse Display Name from og:title or <title> tag
+		// -----------------------------------------------------------------------
+		// PHASE 3: Parse Display Name from og:title or <title> tag
+		// -----------------------------------------------------------------------
 		$full_name = '';
 		if ( ! empty( $og_title ) ) {
 			$dec_og_title = html_entity_decode( $og_title, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
@@ -467,89 +459,112 @@ class Insta_Scraper {
 			}
 		}
 
-		// Parse Bio from meta description: National Geographic (@natgeo) on Instagram: "..."
+		// -----------------------------------------------------------------------
+		// PHASE 4: Parse Bio from meta description
+		// -----------------------------------------------------------------------
 		$biography  = '';
 		$bio_source = ! empty( $meta_desc ) ? $meta_desc : $og_desc;
-		if ( preg_match( '/on Instagram:\s*"(.*?)"/is', $bio_source, $bio_m ) ) {
+		if ( preg_match( '/on Instagram:\s*["\x{201C}](.*?)["\x{201D}]/isu', $bio_source, $bio_m ) ) {
 			$biography = trim( $bio_m[1] );
 		}
 
-		// Try to extract rich JSON embedded in script tags
+		// -----------------------------------------------------------------------
+		// PHASE 5: Extract rich JSON embedded in script tags
+		// Searches ALL script tags for a user node matching the target username.
+		// This is the most reliable source of verified/private status and counts.
+		// -----------------------------------------------------------------------
 		$is_verified  = false;
 		$is_private   = false;
 		$external_url = '';
 
-		// Search for JSON script containing user entity
-		if ( false !== strpos( $html, '"biography":' ) ) {
-			$pos          = strpos( $html, '"biography":' );
-			$script_start = strrpos( substr( $html, 0, $pos ), '<script' );
-			$script_end   = strpos( $html, '</script>', $pos );
+		// Extract and search ALL script tags for user profile JSON
+		if ( preg_match_all( '/<script[^>]*>([\s\S]*?)<\/script>/i', $html, $all_scripts ) ) {
+			foreach ( $all_scripts[1] as $script_inner ) {
+				// Skip very small scripts (no useful data) and scripts without any user-related keys
+				if ( strlen( $script_inner ) < 200 ) {
+					continue;
+				}
+				if ( false === strpos( $script_inner, '"username"' ) && false === strpos( $script_inner, '"biography"' ) ) {
+					continue;
+				}
 
-			if ( false !== $script_start && false !== $script_end ) {
-				$script_content = substr( $html, $script_start, ( $script_end + 9 ) - $script_start );
-				$inner          = preg_replace( '/^<script[^>]*>|<\/script>$/is', '', $script_content );
-				$json           = json_decode( $inner, true );
+				$json = json_decode( $script_inner, true );
+				if ( ! $json || ! is_array( $json ) ) {
+					continue;
+				}
 
-				if ( $json && is_array( $json ) ) {
-					// Strictly match the target username to avoid extracting the logged-in viewer's profile
-					$source = self::find_user_node( $json, $username );
-					if ( $source ) {
-						if ( ! empty( $source['full_name'] ) ) {
-							$full_name = $source['full_name'];
-						}
-						if ( isset( $source['biography'] ) && ! empty( $source['biography'] ) ) {
-							$biography = $source['biography'];
-						}
-						if ( isset( $source['is_verified'] ) ) {
-							$is_verified = (bool) $source['is_verified'];
-						}
-						if ( isset( $source['is_private'] ) ) {
-							$is_private = (bool) $source['is_private'];
-						}
-						if ( ! empty( $source['profile_pic_url_hd'] ) ) {
-							$og_image = $source['profile_pic_url_hd'];
-						} elseif ( ! empty( $source['profile_pic_url'] ) && empty( $og_image ) ) {
-							$og_image = $source['profile_pic_url'];
-						}
-						if ( ! empty( $source['external_url'] ) ) {
-							$external_url = $source['external_url'];
-						}
-						if ( null === $followers_count ) {
-							if ( isset( $source['edge_followed_by']['count'] ) ) {
-								$followers_count = (int) $source['edge_followed_by']['count'];
-							} elseif ( isset( $source['follower_count'] ) ) {
-								$followers_count = (int) $source['follower_count'];
-							}
-						}
-						if ( null === $following_count ) {
-							if ( isset( $source['edge_follow']['count'] ) ) {
-								$following_count = (int) $source['edge_follow']['count'];
-							} elseif ( isset( $source['following_count'] ) ) {
-								$following_count = (int) $source['following_count'];
-							}
-						}
-						if ( null === $posts_count ) {
-							if ( isset( $source['edge_owner_to_timeline_media']['count'] ) ) {
-								$posts_count = (int) $source['edge_owner_to_timeline_media']['count'];
-							} elseif ( isset( $source['media_count'] ) ) {
-								$posts_count = (int) $source['media_count'];
-							}
-						}
+				// Strictly match the target username to avoid extracting the logged-in viewer's profile
+				$source = self::find_user_node( $json, $username );
+				if ( ! $source ) {
+					continue;
+				}
+
+				// Found a valid user node — extract all available fields
+				if ( ! empty( $source['full_name'] ) ) {
+					$full_name = $source['full_name'];
+				}
+				if ( isset( $source['biography'] ) && ! empty( $source['biography'] ) ) {
+					$biography = $source['biography'];
+				}
+				if ( isset( $source['is_verified'] ) ) {
+					$is_verified = (bool) $source['is_verified'];
+				}
+				if ( isset( $source['is_private'] ) ) {
+					$is_private = (bool) $source['is_private'];
+				}
+				if ( ! empty( $source['profile_pic_url_hd'] ) ) {
+					$og_image = $source['profile_pic_url_hd'];
+				} elseif ( ! empty( $source['profile_pic_url'] ) && empty( $og_image ) ) {
+					$og_image = $source['profile_pic_url'];
+				}
+				if ( ! empty( $source['external_url'] ) ) {
+					$external_url = $source['external_url'];
+				}
+				if ( null === $followers_count ) {
+					if ( isset( $source['edge_followed_by']['count'] ) ) {
+						$followers_count = (int) $source['edge_followed_by']['count'];
+					} elseif ( isset( $source['follower_count'] ) ) {
+						$followers_count = (int) $source['follower_count'];
 					}
 				}
+				if ( null === $following_count ) {
+					if ( isset( $source['edge_follow']['count'] ) ) {
+						$following_count = (int) $source['edge_follow']['count'];
+					} elseif ( isset( $source['following_count'] ) ) {
+						$following_count = (int) $source['following_count'];
+					}
+				}
+				if ( null === $posts_count ) {
+					if ( isset( $source['edge_owner_to_timeline_media']['count'] ) ) {
+						$posts_count = (int) $source['edge_owner_to_timeline_media']['count'];
+					} elseif ( isset( $source['media_count'] ) ) {
+						$posts_count = (int) $source['media_count'];
+					}
+				}
+
+				break; // Found our user — stop searching
 			}
 		}
 
-		// Data quality validation: if all key fields are empty/zero, parsing likely failed
-		if ( empty( $full_name ) && null === $followers_count && empty( $biography ) && empty( $og_image ) ) {
+		// -----------------------------------------------------------------------
+		// PHASE 6: Data quality gate — reject and don't cache empty results
+		// -----------------------------------------------------------------------
+		$has_name       = ! empty( $full_name ) && strtolower( $full_name ) !== strtolower( $username );
+		$has_followers  = null !== $followers_count && $followers_count > 0;
+		$has_bio        = ! empty( $biography );
+		$has_image      = ! empty( $og_image );
+
+		if ( ! $has_name && ! $has_followers && ! $has_bio && ! $has_image ) {
 			return new WP_Error(
 				'parse_failed',
-				__( 'Could not extract meaningful profile data. Instagram may have changed its page structure.', 'insta-profile-lookup' ),
+				__( 'Could not extract meaningful profile data. Instagram may have changed its page structure or your server IP is rate-limited. Try configuring a session ID in Settings > Instagram Lookup.', 'insta-profile-lookup' ),
 				array( 'status' => 502 )
 			);
 		}
 
-		// Extract Media Items if public profile
+		// -----------------------------------------------------------------------
+		// PHASE 7: Extract Media Items if public profile
+		// -----------------------------------------------------------------------
 		$media_items = array();
 		if ( ! $is_private ) {
 			$media_items = self::extract_media_items( $html, $username );
@@ -575,6 +590,35 @@ class Insta_Scraper {
 	}
 
 	/**
+	 * Build a properly formatted session cookie string from a raw session ID value.
+	 *
+	 * @param string $session_id Raw session ID or full cookie string.
+	 * @return string Formatted cookie header value.
+	 */
+	private static function build_session_cookie( $session_id ) {
+		$raw_clean = trim( $session_id, "\"' \t\n\r\0\x0B;" );
+
+		// If already a full cookie string (contains = and ;), use as-is
+		if ( false !== strpos( $raw_clean, '=' ) && false !== strpos( $raw_clean, ';' ) ) {
+			return $raw_clean;
+		}
+
+		// Strip 'sessionid=' prefix if present
+		if ( 0 === stripos( $raw_clean, 'sessionid=' ) ) {
+			$raw_clean = substr( $raw_clean, 10 );
+		}
+
+		$cookie = "sessionid={$raw_clean};";
+
+		// Extract ds_user_id from session format {user_id}%3A... or {user_id}:...
+		if ( preg_match( '/^(\d+)[:%]/', $raw_clean, $uid_m ) ) {
+			$cookie .= " ds_user_id={$uid_m[1]};";
+		}
+
+		return $cookie;
+	}
+
+	/**
 	 * Extract recent media posts from HTML and Polaris JSON.
 	 *
 	 * @param string $html
@@ -588,7 +632,7 @@ class Insta_Scraper {
 		if ( preg_match_all( '/"pk":"(\d+)"[^{}]*"image_versions2":\{"candidates":\[\{[^{}]*"url":"([^"]+)"/i', $html, $pk_matches, PREG_SET_ORDER ) ) {
 			foreach ( $pk_matches as $m ) {
 				$pk        = $m[1];
-				$raw_url   = str_replace( '\/', '/', $m[2] );
+				$raw_url   = str_replace( '\\/', '/', $m[2] );
 				$url       = html_entity_decode( $raw_url, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 				$shortcode = self::media_id_to_shortcode( $pk );
 				$items[ $pk ] = array(
@@ -621,10 +665,14 @@ class Insta_Scraper {
 				if ( false === strpos( $src, 'cdninstagram.com' ) && false === strpos( $src, 'fbcdn.net' ) ) {
 					continue;
 				}
+				// Skip static resources (CSS sprites, icons)
+				if ( false !== strpos( $src, '/rsrc.php/' ) || false !== strpos( $src, '/static/' ) ) {
+					continue;
+				}
 
 				// Extract caption from alt
 				$caption = '';
-				if ( preg_match( '/alt=["\']([^"\']*)["\']/is', $tag, $alt_m ) ) {
+				if ( preg_match( '/alt=["\']([^"\']*)["\']/', $tag, $alt_m ) ) {
 					$caption = html_entity_decode( $alt_m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 				}
 
@@ -752,14 +800,14 @@ class Insta_Scraper {
 		if ( function_exists( 'gmp_init' ) ) {
 			$id = gmp_init( $media_id );
 			while ( gmp_cmp( $id, 0 ) > 0 ) {
-				$rem      = gmp_intval( gmp_mod( $id, 64 ) );
-				$code     = $alphabet[ $rem ] . $code;
-				$id       = gmp_div_q( $id, 64 );
+				$rem  = gmp_intval( gmp_mod( $id, 64 ) );
+				$code = $alphabet[ $rem ] . $code;
+				$id   = gmp_div_q( $id, 64 );
 			}
 			return $code;
 		}
 
-		// Native 64-bit PHP arithmetic fallback when extensions are absent
+		// Native 64-bit PHP arithmetic fallback
 		if ( PHP_INT_SIZE >= 8 ) {
 			$id = (int) $media_id;
 			if ( $id > 0 && (string) $id === (string) $media_id ) {
@@ -803,8 +851,8 @@ class Insta_Scraper {
 
 	/**
 	 * Find a user node in nested JSON data that matches the target username.
-	 * This is more reliable than blind key extraction, as it ensures data
-	 * belongs to the correct user and not to other entities (comments, suggestions).
+	 * This ensures data belongs to the correct user and not to the logged-in
+	 * viewer or other entities (comments, suggestions).
 	 *
 	 * @param array  $arr      The JSON data to search.
 	 * @param string $username The target username to match.
@@ -830,27 +878,6 @@ class Insta_Scraper {
 			}
 		}
 		return null;
-	}
-
-	/**
-	 * Helper to recursively search an array for target keys.
-	 *
-	 * @param array $arr
-	 * @param array $keys
-	 * @param array &$results
-	 */
-	private static function extract_nested_keys( $arr, $keys, &$results ) {
-		if ( ! is_array( $arr ) ) {
-			return;
-		}
-		foreach ( $arr as $k => $v ) {
-			if ( in_array( $k, $keys, true ) && ! isset( $results[ $k ] ) ) {
-				$results[ $k ] = $v;
-			}
-			if ( is_array( $v ) ) {
-				self::extract_nested_keys( $v, $keys, $results );
-			}
-		}
 	}
 
 	/**
