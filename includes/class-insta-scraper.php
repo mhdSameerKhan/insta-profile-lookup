@@ -136,7 +136,16 @@ class Insta_Scraper {
 			$api_error = $result;
 		}
 
-		// 3. Attempt Strategy B: HTML scraper with crawler UA (+ session cookie to bypass datacenter 429)
+		// 3. Attempt Strategy B: GraphQL endpoint with session cookie (works from datacenter IPs)
+		if ( ! empty( $session_id ) ) {
+			$result = self::fetch_via_graphql( $username, $session_id );
+			if ( ! is_wp_error( $result ) && ! empty( $result ) ) {
+				Insta_Cache::set( $username, $result );
+				return $result;
+			}
+		}
+
+		// 4. Attempt Strategy C: HTML scraper with crawler UA (+ session cookie to bypass datacenter 429)
 		$result = self::fetch_via_html_scraper( $username, $session_id );
 		if ( ! is_wp_error( $result ) && ! empty( $result ) ) {
 			Insta_Cache::set( $username, $result );
@@ -167,6 +176,58 @@ class Insta_Scraper {
 	}
 
 	/**
+	 * Temporary proxy action callback.
+	 *
+	 * @var callable|null
+	 */
+	private static $proxy_callback = null;
+
+	/**
+	 * Attach proxy configuration to WordPress HTTP requests.
+	 */
+	private static function attach_proxy() {
+		$proxy = Insta_Admin::get_proxy();
+		if ( empty( $proxy ) ) {
+			return;
+		}
+
+		self::detach_proxy();
+
+		self::$proxy_callback = function( $handle ) use ( $proxy ) {
+			$trimmed = trim( $proxy );
+			$parsed  = parse_url( $trimmed );
+
+			$host = isset( $parsed['host'] ) ? $parsed['host'] : '';
+			$port = isset( $parsed['port'] ) ? (int) $parsed['port'] : 0;
+			$user = isset( $parsed['user'] ) ? $parsed['user'] : '';
+			$pass = isset( $parsed['pass'] ) ? $parsed['pass'] : '';
+
+			if ( ! empty( $host ) ) {
+				$proxy_addr = $host . ( $port > 0 ? ':' . $port : '' );
+				curl_setopt( $handle, CURLOPT_PROXY, $proxy_addr );
+				if ( ! empty( $user ) || ! empty( $pass ) ) {
+					curl_setopt( $handle, CURLOPT_PROXYAUTH, CURLAUTH_BASIC );
+					curl_setopt( $handle, CURLOPT_PROXYUSERPWD, "{$user}:{$pass}" );
+				}
+			} else {
+				curl_setopt( $handle, CURLOPT_PROXY, $trimmed );
+			}
+		};
+
+		add_action( 'http_api_curl', self::$proxy_callback, 10, 1 );
+	}
+
+	/**
+	 * Detach proxy configuration from WordPress HTTP requests.
+	 */
+	private static function detach_proxy() {
+		if ( self::$proxy_callback ) {
+			remove_action( 'http_api_curl', self::$proxy_callback, 10 );
+			self::$proxy_callback = null;
+		}
+	}
+
+	/**
 	 * Fetch profile via Instagram web_profile_info endpoint (authenticated with session).
 	 *
 	 * @param string $username
@@ -194,26 +255,15 @@ class Insta_Scraper {
 			'insta_lookup_web_api_args',
 			array(
 				'headers'   => $headers,
-				'timeout'   => 15,
+				'timeout'   => 8,
 				'sslverify' => true,
 			),
 			$username
 		);
 
-		$proxy = Insta_Admin::get_proxy();
-		$proxy_callback = null;
-		if ( ! empty( $proxy ) ) {
-			$proxy_callback = function( $handle ) use ( $proxy ) {
-				curl_setopt( $handle, CURLOPT_PROXY, $proxy );
-			};
-			add_action( 'http_api_curl', $proxy_callback, 10, 1 );
-		}
-
+		self::attach_proxy();
 		$response = wp_remote_get( $url, $args );
-
-		if ( $proxy_callback ) {
-			remove_action( 'http_api_curl', $proxy_callback, 10 );
-		}
+		self::detach_proxy();
 
 		if ( is_wp_error( $response ) ) {
 			$error_message = $response->get_error_message();
@@ -260,6 +310,73 @@ class Insta_Scraper {
 	}
 
 	/**
+	 * Fetch profile via Instagram GraphQL endpoint.
+	 * This endpoint often works from datacenter IPs when the REST API returns 429.
+	 *
+	 * @param string $username
+	 * @param string $session_id
+	 * @return array|WP_Error
+	 */
+	private static function fetch_via_graphql( $username, $session_id ) {
+		// First, resolve the user ID via the web page
+		$clean_cookie = self::build_session_cookie( $session_id );
+
+		// Try the /?__a=1&__d=dis endpoint which returns JSON profile data
+		$url = "https://www.instagram.com/{$username}/?__a=1&__d=dis";
+
+		$headers = array(
+			'User-Agent'      => self::BROWSER_USER_AGENT,
+			'Accept'          => '*/*',
+			'Accept-Language'  => 'en-US,en;q=0.9',
+			'x-ig-app-id'     => self::get_app_id(),
+			'x-requested-with' => 'XMLHttpRequest',
+			'Referer'         => "https://www.instagram.com/{$username}/",
+			'Cookie'          => $clean_cookie,
+		);
+
+		self::attach_proxy();
+		$response = wp_remote_get( $url, array(
+			'headers'   => $headers,
+			'timeout'   => 8,
+			'sslverify' => true,
+		) );
+		self::detach_proxy();
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$status = (int) wp_remote_retrieve_response_code( $response );
+		if ( 200 !== $status ) {
+			return new WP_Error( 'graphql_error', "Instagram GraphQL returned HTTP {$status}", array( 'status' => $status ) );
+		}
+
+		$body = wp_remote_retrieve_body( $response );
+		$json = json_decode( $body, true );
+
+		// The ?__a=1&__d=dis endpoint returns {graphql: {user: {...}}}
+		$user = null;
+		if ( isset( $json['graphql']['user'] ) ) {
+			$user = $json['graphql']['user'];
+		} elseif ( isset( $json['data']['user'] ) ) {
+			$user = $json['data']['user'];
+		} elseif ( isset( $json['user'] ) ) {
+			$user = $json['user'];
+		}
+
+		if ( ! $user || ! isset( $user['username'] ) ) {
+			return new WP_Error( 'graphql_parse_error', 'Could not parse GraphQL response', array( 'status' => 500 ) );
+		}
+
+		// Verify username match
+		if ( strtolower( $user['username'] ) !== strtolower( $username ) ) {
+			return new WP_Error( 'user_mismatch', 'GraphQL returned wrong user', array( 'status' => 500 ) );
+		}
+
+		return self::normalize_user_object( $user );
+	}
+
+	/**
 	 * Fetch profile via public server-rendered HTML.
 	 *
 	 * Uses crawler user agents which receive server-rendered HTML with OpenGraph meta tags
@@ -285,15 +402,6 @@ class Insta_Scraper {
 			$clean_cookie = self::build_session_cookie( $session_id );
 		}
 
-		$proxy = Insta_Admin::get_proxy();
-		$proxy_callback = null;
-		if ( ! empty( $proxy ) ) {
-			$proxy_callback = function( $handle ) use ( $proxy ) {
-				curl_setopt( $handle, CURLOPT_PROXY, $proxy );
-			};
-			add_action( 'http_api_curl', $proxy_callback, 10, 1 );
-		}
-
 		$response = null;
 		$html     = '';
 
@@ -313,13 +421,15 @@ class Insta_Scraper {
 				'insta_lookup_html_scraper_args',
 				array(
 					'headers'   => $headers,
-					'timeout'   => 15,
+					'timeout'   => 8,
 					'sslverify' => true,
 				),
 				$username
 			);
 
+			self::attach_proxy();
 			$response = wp_remote_get( $url, $args );
+			self::detach_proxy();
 
 			if ( is_wp_error( $response ) ) {
 				continue;
@@ -342,9 +452,6 @@ class Insta_Scraper {
 				$candidate_html = wp_remote_retrieve_body( $response );
 				if ( false !== stripos( $candidate_html, "Sorry, this page isn't available" ) ||
 					 false !== stripos( $candidate_html, 'The link you followed may be broken' ) ) {
-					if ( $proxy_callback ) {
-						remove_action( 'http_api_curl', $proxy_callback, 10 );
-					}
 					return new WP_Error(
 						'user_not_found',
 						sprintf( __( 'Instagram user "@%s" could not be found.', 'insta-profile-lookup' ), $username ),
@@ -352,10 +459,6 @@ class Insta_Scraper {
 					);
 				}
 			}
-		}
-
-		if ( $proxy_callback ) {
-			remove_action( 'http_api_curl', $proxy_callback, 10 );
 		}
 
 		if ( empty( $html ) ) {
@@ -549,12 +652,17 @@ class Insta_Scraper {
 		// -----------------------------------------------------------------------
 		// PHASE 6: Data quality gate — reject and don't cache empty results
 		// -----------------------------------------------------------------------
+		// Reject generic/static Instagram images (not real profile pictures)
+		$is_real_image = ! empty( $og_image )
+			&& false === strpos( $og_image, '/rsrc.php/' )
+			&& false === strpos( $og_image, '/static/' )
+			&& false === strpos( $og_image, 'static.cdninstagram.com' );
+
 		$has_name       = ! empty( $full_name ) && strtolower( $full_name ) !== strtolower( $username );
 		$has_followers  = null !== $followers_count && $followers_count > 0;
 		$has_bio        = ! empty( $biography );
-		$has_image      = ! empty( $og_image );
 
-		if ( ! $has_name && ! $has_followers && ! $has_bio && ! $has_image ) {
+		if ( ! $has_name && ! $has_followers && ! $has_bio && ! $is_real_image ) {
 			return new WP_Error(
 				'parse_failed',
 				__( 'Could not extract meaningful profile data. Instagram may have changed its page structure or your server IP is rate-limited. Try configuring a session ID in Settings > Instagram Lookup.', 'insta-profile-lookup' ),
