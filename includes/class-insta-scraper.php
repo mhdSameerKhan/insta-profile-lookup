@@ -116,7 +116,18 @@ class Insta_Scraper {
 
 		// 2. Attempt Strategy A: Session Cookie if provided
 		$session_id = Insta_Admin::get_session_id();
+		$api_error  = null;
+
 		if ( ! empty( $session_id ) ) {
+			// Check for literal placeholder string
+			if ( 'paste_your_copied_session_id_here' === trim( $session_id ) ) {
+				return new WP_Error(
+					'placeholder_session_id',
+					__( 'Placeholder session ID detected in wp-config.php. Please replace "paste_your_copied_session_id_here" with your actual Instagram session cookie value.', 'insta-profile-lookup' ),
+					array( 'status' => 400 )
+				);
+			}
+
 			$result = self::fetch_via_web_api( $username, $session_id );
 			if ( ! is_wp_error( $result ) && ! empty( $result ) ) {
 				Insta_Cache::set( $username, $result );
@@ -126,10 +137,11 @@ class Insta_Scraper {
 			if ( is_wp_error( $result ) && 'user_not_found' === $result->get_error_code() ) {
 				return $result;
 			}
+			$api_error = $result;
 		}
 
-		// 3. Attempt Strategy B: Server-rendered HTML scraper using verified crawler user-agent
-		$result = self::fetch_via_html_scraper( $username );
+		// 3. Attempt Strategy B: Server-rendered HTML scraper (passes session cookie if available)
+		$result = self::fetch_via_html_scraper( $username, $session_id );
 		if ( ! is_wp_error( $result ) && ! empty( $result ) ) {
 			Insta_Cache::set( $username, $result );
 			return $result;
@@ -137,6 +149,18 @@ class Insta_Scraper {
 
 		// If HTML scraper returned a specific error (e.g., 404 user not found), return it
 		if ( is_wp_error( $result ) ) {
+			// If a session ID was provided but both strategies failed, provide informative diagnostic message
+			if ( ! empty( $session_id ) && 'upstream_rate_limited' === $result->get_error_code() ) {
+				$detail = is_wp_error( $api_error ) ? ' (' . $api_error->get_error_message() . ')' : '';
+				return new WP_Error(
+					'session_rejected_or_expired',
+					sprintf(
+						__( 'Instagram rejected the session%s. Your Instagram session ID may be expired, invalid, or requires a fresh login. Please check or regenerate your session ID.', 'insta-profile-lookup' ),
+						$detail
+					),
+					array( 'status' => 401 )
+				);
+			}
 			return $result;
 		}
 
@@ -157,13 +181,29 @@ class Insta_Scraper {
 	private static function fetch_via_web_api( $username, $session_id ) {
 		$url = "https://www.instagram.com/api/v1/users/web_profile_info/?username={$username}";
 
+		// Clean up session ID format (strip quotes, spaces, or leading 'sessionid=')
+		$clean_sid = trim( $session_id, "\"' \t\n\r\0\x0B;" );
+		if ( 0 === stripos( $clean_sid, 'sessionid=' ) ) {
+			$clean_sid = substr( $clean_sid, 10 );
+		}
+
+		$cookie_header = "sessionid={$clean_sid};";
+
+		// Extract ds_user_id from session ID (format: {user_id}%3A...)
+		if ( preg_match( '/^(\d+)[:%]/', $clean_sid, $uid_m ) ) {
+			$cookie_header .= " ds_user_id={$uid_m[1]};";
+		}
+
 		$headers = array(
-			'User-Agent'       => self::BROWSER_USER_AGENT,
-			'x-ig-app-id'      => self::get_app_id(),
-			'Accept'           => '*/*',
-			'Accept-Language'  => 'en-US,en;q=0.9',
-			'Referer'          => "https://www.instagram.com/{$username}/",
-			'Cookie'           => "sessionid={$session_id};",
+			'User-Agent'         => self::BROWSER_USER_AGENT,
+			'x-ig-app-id'        => self::get_app_id(),
+			'x-asbd-id'          => '129477',
+			'x-ig-www-claim'     => '0',
+			'x-requested-with'   => 'XMLHttpRequest',
+			'Accept'             => '*/*',
+			'Accept-Language'    => 'en-US,en;q=0.9',
+			'Referer'            => "https://www.instagram.com/{$username}/",
+			'Cookie'             => $cookie_header,
 		);
 
 		$args = apply_filters(
@@ -200,7 +240,7 @@ class Insta_Scraper {
 		}
 
 		if ( 200 !== $status ) {
-			return new WP_Error( 'api_error', "Instagram returned status {$status}", array( 'status' => $status ) );
+			return new WP_Error( 'api_error', "Instagram Web API returned HTTP {$status}", array( 'status' => $status ) );
 		}
 
 		$body = wp_remote_retrieve_body( $response );
@@ -219,17 +259,29 @@ class Insta_Scraper {
 	 * @param string $username
 	 * @return array|WP_Error
 	 */
-	private static function fetch_via_html_scraper( $username ) {
+	private static function fetch_via_html_scraper( $username, $session_id = '' ) {
 		$url = "https://www.instagram.com/{$username}/";
+
+		$headers = array(
+			'User-Agent'      => self::BOT_USER_AGENT,
+			'Accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+			'Accept-Language' => 'en-US,en;q=0.9',
+		);
+
+		// If a session ID is available, pass it to the HTML scraper and switch to browser user agent
+		if ( ! empty( $session_id ) && 'paste_your_copied_session_id_here' !== trim( $session_id ) ) {
+			$clean_sid = trim( $session_id, "\"' \t\n\r\0\x0B;" );
+			if ( 0 === stripos( $clean_sid, 'sessionid=' ) ) {
+				$clean_sid = substr( $clean_sid, 10 );
+			}
+			$headers['Cookie']     = "sessionid={$clean_sid};";
+			$headers['User-Agent'] = self::BROWSER_USER_AGENT;
+		}
 
 		$args = apply_filters(
 			'insta_lookup_html_scraper_args',
 			array(
-				'headers'   => array(
-					'User-Agent'      => self::BOT_USER_AGENT,
-					'Accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-					'Accept-Language' => 'en-US,en;q=0.9',
-				),
+				'headers'   => $headers,
 				'timeout'   => 15,
 				'sslverify' => true,
 			),
