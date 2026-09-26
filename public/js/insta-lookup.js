@@ -111,7 +111,14 @@
 						return;
 					}
 
-					var profile = response.data && response.data.data ? response.data.data : null;
+					var profile = null;
+					if (response.data) {
+						if (response.data.data && response.data.data.username) {
+							profile = response.data.data;
+						} else if (response.data.username) {
+							profile = response.data;
+						}
+					}
 					if (!profile || !profile.username) {
 						setState('error', (settings.strings && settings.strings.errorNotFound) || 'Profile not found.');
 						return;
