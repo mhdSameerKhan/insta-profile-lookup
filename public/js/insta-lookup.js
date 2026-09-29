@@ -249,20 +249,24 @@
 				'</div>';
 		} else if (profile.media && profile.media.length > 0) {
 			var mediaCardsHtml = '';
-			profile.media.forEach(function (m) {
+			profile.media.forEach(function (m, idx) {
 				var videoBadge = m.is_video ?
 					'<span class="insta-video-badge"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>' : '';
 				var captionPreview = m.caption ?
-					'<p class="insta-media-caption-preview">' + escapeHtml(m.caption) + '</p>' :
-					'<span class="insta-media-caption-preview">' + escapeHtml(strings.viewOnInsta || 'View Post') + '</span>';
+					'<p class="insta-media-caption-preview">' + escapeHtml(m.caption) + '</p>' : '';
 
 				mediaCardsHtml +=
-					'<div class="insta-media-card">' +
+					'<div class="insta-media-card" role="button" tabindex="0"' +
+					' data-media-src="' + escapeHtml(m.thumbnail) + '"' +
+					' data-media-isvideo="' + (m.is_video ? '1' : '0') + '"' +
+					' data-media-caption="' + escapeHtml(m.caption || '') + '"' +
+					' data-media-instaurl="' + escapeHtml(m.url || profileUrl) + '"' +
+					'>' +
 					'<img class="insta-media-thumb" src="' + escapeHtml(m.thumbnail) + '" alt="' + escapeHtml(m.caption || profile.username) + '" referrerpolicy="no-referrer" loading="lazy" data-raw-url="' + escapeHtml(m.thumbnail) + '" />' +
 					videoBadge +
-					'<a class="insta-media-overlay" href="' + escapeHtml(m.url || profileUrl) + '" target="_blank" rel="noopener noreferrer">' +
+					'<div class="insta-media-overlay">' +
 					captionPreview +
-					'</a>' +
+					'</div>' +
 					'</div>';
 			});
 
@@ -296,7 +300,12 @@
 			'<div class="insta-profile-header-banner"></div>' +
 			'<div class="insta-profile-body">' +
 			'<div class="insta-profile-avatar-row">' +
-			'<div class="insta-avatar-ring">' +
+			'<div class="insta-avatar-ring insta-avatar-clickable" role="button" tabindex="0" title="' + escapeHtml(strings.viewProfilePic || 'View profile picture') + '"' +
+			' data-media-src="' + escapeHtml(profile.profile_pic_url) + '"' +
+			' data-media-isvideo="0"' +
+			' data-media-caption="' + escapeHtml((profile.full_name || profile.username) + ' \u2014 Profile Picture') + '"' +
+			' data-media-instaurl="' + escapeHtml(profileUrl) + '"' +
+			'>' +
 			'<img class="insta-avatar-img" src="' + escapeHtml(profile.profile_pic_url) + '" alt="' + escapeHtml(profile.username) + '" referrerpolicy="no-referrer" data-raw-url="' + escapeHtml(profile.profile_pic_url) + '" />' +
 			'</div>' +
 			'<div class="insta-profile-actions">' +
@@ -367,12 +376,251 @@
 				}
 			});
 		});
+
+		// Bind lightbox triggers on media cards and profile picture
+		var lightboxTriggers = targetElement.querySelectorAll('.insta-media-card[data-media-src], .insta-avatar-clickable[data-media-src]');
+		lightboxTriggers.forEach(function (el) {
+			el.addEventListener('click', function (e) {
+				e.preventDefault();
+				e.stopPropagation();
+				openLightbox({
+					src: el.getAttribute('data-media-src'),
+					isVideo: el.getAttribute('data-media-isvideo') === '1',
+					caption: el.getAttribute('data-media-caption') || '',
+					instaUrl: el.getAttribute('data-media-instaurl') || '',
+					proxyUrl: settings.proxyUrl || '',
+					isProfilePic: el.classList.contains('insta-avatar-clickable')
+				});
+			});
+			// Also handle keyboard (Enter/Space)
+			el.addEventListener('keydown', function (e) {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.preventDefault();
+					el.click();
+				}
+			});
+		});
+	}
+
+	/* ======================================================================
+	   Lightbox Controller
+	   ====================================================================== */
+
+	/**
+	 * Open lightbox with provided media data.
+	 *
+	 * @param {Object} data
+	 * @param {string} data.src        - Direct media URL.
+	 * @param {boolean} data.isVideo   - Whether this is a video.
+	 * @param {string} data.caption    - Caption text.
+	 * @param {string} data.instaUrl   - Instagram post URL.
+	 * @param {string} data.proxyUrl   - WP proxy endpoint URL.
+	 */
+	function openLightbox(data) {
+		var lightbox = document.getElementById('insta-lightbox');
+		if (!lightbox) return;
+
+		var mediaContainer = lightbox.querySelector('.insta-lightbox-media');
+		var downloadBtn = lightbox.querySelector('.insta-lightbox-download');
+		var instaBtn = lightbox.querySelector('.insta-lightbox-instagram');
+		var captionEl = lightbox.querySelector('.insta-lightbox-caption');
+
+		// Reset previous content
+		mediaContainer.innerHTML = '<div class="insta-lightbox-spinner"></div>';
+		if (data.isProfilePic) {
+			mediaContainer.classList.add('is-profile-pic');
+		} else {
+			mediaContainer.classList.remove('is-profile-pic');
+		}
+
+		// Determine the best URL to use (try proxy first for cross-origin download support)
+		var displaySrc = data.src;
+		var proxiedSrc = data.proxyUrl ? data.proxyUrl + '?url=' + encodeURIComponent(data.src) : data.src;
+
+		if (data.isVideo) {
+			var video = document.createElement('video');
+			video.controls = true;
+			video.autoplay = true;
+			video.playsInline = true;
+			video.preload = 'auto';
+			video.src = proxiedSrc;
+			video.addEventListener('loadeddata', function () {
+				var spinner = mediaContainer.querySelector('.insta-lightbox-spinner');
+				if (spinner) spinner.remove();
+			});
+			video.addEventListener('error', function () {
+				// Fallback to direct src if proxy fails
+				if (video.src !== displaySrc) {
+					video.src = displaySrc;
+				}
+				var spinner = mediaContainer.querySelector('.insta-lightbox-spinner');
+				if (spinner) spinner.remove();
+			});
+			mediaContainer.appendChild(video);
+		} else {
+			var img = document.createElement('img');
+			img.alt = data.caption || 'Instagram media';
+			img.src = proxiedSrc;
+			img.addEventListener('load', function () {
+				var spinner = mediaContainer.querySelector('.insta-lightbox-spinner');
+				if (spinner) spinner.remove();
+			});
+			img.addEventListener('error', function () {
+				// Fallback to direct src if proxy fails
+				if (img.src !== displaySrc) {
+					img.src = displaySrc;
+				}
+				var spinner = mediaContainer.querySelector('.insta-lightbox-spinner');
+				if (spinner) spinner.remove();
+			});
+			mediaContainer.appendChild(img);
+		}
+
+		// Download button
+		if (downloadBtn) {
+			downloadBtn.onclick = function (e) {
+				e.preventDefault();
+				downloadMedia(proxiedSrc, displaySrc, data.isVideo);
+			};
+		}
+
+		// Open on Instagram button
+		if (instaBtn) {
+			if (data.instaUrl) {
+				instaBtn.href = data.instaUrl;
+				instaBtn.style.display = '';
+			} else {
+				instaBtn.style.display = 'none';
+			}
+		}
+
+		// Caption
+		if (captionEl) {
+			captionEl.textContent = data.caption || '';
+		}
+
+		// Show lightbox
+		lightbox.style.display = 'flex';
+		document.body.style.overflow = 'hidden';
+	}
+
+	/**
+	 * Close the lightbox and clean up.
+	 */
+	function closeLightbox() {
+		var lightbox = document.getElementById('insta-lightbox');
+		if (!lightbox) return;
+
+		// Stop any playing video
+		var video = lightbox.querySelector('video');
+		if (video) {
+			video.pause();
+			video.src = '';
+		}
+
+		lightbox.style.display = 'none';
+		document.body.style.overflow = '';
+
+		var mediaContainer = lightbox.querySelector('.insta-lightbox-media');
+		if (mediaContainer) {
+			mediaContainer.innerHTML = '';
+		}
+	}
+
+	/**
+	 * Download media file to user's device.
+	 * Uses fetch+blob for cross-origin files (through the proxy).
+	 *
+	 * @param {string}  primaryUrl  - Proxied URL (same-origin).
+	 * @param {string}  fallbackUrl - Direct CDN URL (fallback).
+	 * @param {boolean} isVideo     - Whether file is a video.
+	 */
+	function downloadMedia(primaryUrl, fallbackUrl, isVideo) {
+		var ext = isVideo ? 'mp4' : 'jpg';
+		var filename = 'instagram_' + Date.now() + '.' + ext;
+
+		fetch(primaryUrl)
+			.then(function (res) {
+				if (!res.ok) throw new Error('Fetch failed');
+				return res.blob();
+			})
+			.then(function (blob) {
+				triggerBlobDownload(blob, filename);
+			})
+			.catch(function () {
+				// Fallback: try direct URL fetch, or open in new tab as last resort
+				if (fallbackUrl && fallbackUrl !== primaryUrl) {
+					fetch(fallbackUrl)
+						.then(function (res) {
+							if (!res.ok) throw new Error('Fallback failed');
+							return res.blob();
+						})
+						.then(function (blob) {
+							triggerBlobDownload(blob, filename);
+						})
+						.catch(function () {
+							window.open(primaryUrl, '_blank');
+						});
+				} else {
+					window.open(primaryUrl, '_blank');
+				}
+			});
+	}
+
+	/**
+	 * Create a temporary anchor to trigger browser download from a Blob.
+	 */
+	function triggerBlobDownload(blob, filename) {
+		var url = URL.createObjectURL(blob);
+		var a = document.createElement('a');
+		a.href = url;
+		a.download = filename;
+		a.style.display = 'none';
+		document.body.appendChild(a);
+		a.click();
+		setTimeout(function () {
+			URL.revokeObjectURL(url);
+			a.remove();
+		}, 100);
+	}
+
+	/**
+	 * Bind global lightbox events (close button, backdrop, ESC key).
+	 * Called once on init.
+	 */
+	function bindLightboxGlobalEvents() {
+		document.addEventListener('click', function (e) {
+			// Close button
+			if (e.target.closest('.insta-lightbox-close')) {
+				closeLightbox();
+				return;
+			}
+			// Backdrop click
+			if (e.target.classList.contains('insta-lightbox-backdrop')) {
+				closeLightbox();
+				return;
+			}
+		});
+
+		// ESC key to close
+		document.addEventListener('keydown', function (e) {
+			if (e.key === 'Escape') {
+				var lightbox = document.getElementById('insta-lightbox');
+				if (lightbox && lightbox.style.display !== 'none') {
+					closeLightbox();
+				}
+			}
+		});
 	}
 
 	// Initialize on page load
 	if (document.readyState === 'loading') {
-		document.addEventListener('DOMContentLoaded', initLookupInstances);
+		document.addEventListener('DOMContentLoaded', function () {
+			initLookupInstances();
+			bindLightboxGlobalEvents();
+		});
 	} else {
 		initLookupInstances();
+		bindLightboxGlobalEvents();
 	}
 })();

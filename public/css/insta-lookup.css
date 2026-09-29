@@ -504,6 +504,7 @@
 	background: #f1f5f9;
 	box-shadow: var(--insta-shadow-sm);
 	transition: var(--insta-transition);
+	cursor: pointer;
 }
 
 .insta-media-card:hover {
@@ -526,19 +527,20 @@
 .insta-media-overlay {
 	position: absolute;
 	inset: 0;
-	background: rgba(0, 0, 0, 0.45);
+	background: rgba(0, 0, 0, 0.4);
 	opacity: 0;
-	display: flex;
+	display: none;
 	align-items: center;
 	justify-content: center;
 	padding: 12px;
 	color: #ffffff;
 	text-decoration: none;
 	transition: opacity 0.2s ease;
+	pointer-events: none;
 }
 
 .insta-media-card:hover .insta-media-overlay {
-	opacity: 1;
+	opacity: 0;
 }
 
 .insta-media-caption-preview {
@@ -564,6 +566,214 @@
 	align-items: center;
 	justify-content: center;
 	pointer-events: none;
+}
+
+/* ==========================================================================
+   Clickable Profile Picture
+   ========================================================================== */
+.insta-avatar-ring.insta-avatar-clickable {
+	cursor: pointer;
+	transition: var(--insta-transition);
+}
+
+.insta-avatar-ring.insta-avatar-clickable:hover {
+	transform: scale(1.06);
+	box-shadow: var(--insta-shadow-lg);
+}
+
+/* ==========================================================================
+   Lightbox / Media Viewer Modal
+   ========================================================================== */
+.insta-lightbox {
+	position: fixed;
+	inset: 0;
+	z-index: 999999;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	animation: insta-lightbox-in 0.25s ease-out;
+}
+
+.insta-lightbox-backdrop {
+	position: absolute;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.88);
+}
+
+.insta-lightbox-container {
+	position: relative;
+	z-index: 1;
+	background: var(--insta-bg-card);
+	border-radius: var(--insta-radius-lg);
+	box-shadow: 0 25px 60px -12px rgba(0, 0, 0, 0.45);
+	max-width: 1100px;
+	width: 95%;
+	max-height: 95vh;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	animation: insta-lightbox-scale-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.insta-lightbox-close {
+	position: absolute;
+	top: 12px;
+	right: 12px;
+	z-index: 10;
+	width: 36px;
+	height: 36px;
+	border-radius: 50%;
+	border: none !important;
+	background: rgba(0, 0, 0, 0.55) !important;
+	color: #ffffff !important;
+	font-size: 22px;
+	line-height: 1;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	transition: var(--insta-transition);
+	padding: 0 !important;
+}
+
+.insta-lightbox-close:hover {
+	background: rgba(0, 0, 0, 0.8) !important;
+	transform: scale(1.1);
+}
+
+.insta-lightbox-media {
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: #0b0f19;
+	min-height: 350px;
+	max-height: 80vh;
+	overflow: hidden;
+	padding: 16px;
+}
+
+.insta-lightbox-media img {
+	display: block;
+	max-width: 100%;
+	max-height: 80vh;
+	width: auto;
+	height: auto;
+	object-fit: contain;
+	image-rendering: -webkit-optimize-contrast;
+	image-rendering: crisp-edges;
+}
+
+.insta-lightbox-media.is-profile-pic {
+	padding: 32px;
+	min-height: 400px;
+}
+
+.insta-lightbox-media.is-profile-pic img {
+	max-width: 100%;
+	max-height: 78vh;
+	width: auto;
+	height: auto;
+	border-radius: 12px;
+	object-fit: contain;
+	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+	image-rendering: -webkit-optimize-contrast;
+	image-rendering: crisp-edges;
+}
+
+.insta-lightbox-media video {
+	display: block;
+	max-width: 100%;
+	max-height: 75vh;
+	width: auto;
+	height: auto;
+	object-fit: contain;
+	outline: none;
+}
+
+.insta-lightbox-media .insta-lightbox-spinner {
+	position: absolute;
+	width: 32px;
+	height: 32px;
+	border: 3px solid rgba(255, 255, 255, 0.2);
+	border-top-color: #ffffff;
+	border-radius: 50%;
+	animation: insta-spin 0.75s infinite linear;
+}
+
+.insta-lightbox-actions {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	padding: 16px 20px;
+	border-top: 1px solid var(--insta-border);
+	background: var(--insta-bg-subtle);
+}
+
+.insta-lightbox-download {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: var(--insta-gradient) !important;
+	color: #ffffff !important;
+	text-decoration: none !important;
+	border-radius: var(--insta-radius-sm);
+	padding: 10px 20px;
+	font-size: 0.9rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: var(--insta-transition);
+	box-shadow: 0 2px 8px rgba(225, 48, 108, 0.25);
+	line-height: 1.4;
+}
+
+.insta-lightbox-download:hover {
+	opacity: 0.92;
+	transform: translateY(-1px);
+	box-shadow: 0 4px 14px rgba(225, 48, 108, 0.35);
+	color: #ffffff !important;
+	text-decoration: none !important;
+}
+
+.insta-lightbox-instagram {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: #0f172a !important;
+	color: #ffffff !important;
+	text-decoration: none !important;
+	border-radius: var(--insta-radius-sm);
+	padding: 10px 20px;
+	font-size: 0.9rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: var(--insta-transition);
+	line-height: 1.4;
+}
+
+.insta-lightbox-instagram:hover {
+	background: #334155 !important;
+	transform: translateY(-1px);
+	color: #ffffff !important;
+	text-decoration: none !important;
+}
+
+.insta-lightbox-caption {
+	margin: 0;
+	padding: 12px 20px 16px;
+	font-size: 0.875rem;
+	color: var(--insta-text-muted);
+	line-height: 1.5;
+	max-height: 80px;
+	overflow-y: auto;
+	word-break: break-word;
+	border-top: 1px solid var(--insta-border);
+}
+
+.insta-lightbox-caption:empty {
+	display: none;
 }
 
 /* ==========================================================================
@@ -671,6 +881,26 @@
 	}
 }
 
+@keyframes insta-lightbox-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+@keyframes insta-lightbox-scale-in {
+	from {
+		opacity: 0;
+		transform: scale(0.92) translateY(12px);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1) translateY(0);
+	}
+}
+
 @media (max-width: 640px) {
 	.insta-lookup-card {
 		padding: 20px;
@@ -705,5 +935,56 @@
 	.insta-media-grid,
 	.insta-skeleton-grid {
 		grid-template-columns: repeat(2, 1fr);
+	}
+
+	/* Lightbox mobile overrides */
+	.insta-lightbox {
+		padding: 12px;
+	}
+
+	.insta-lightbox-container {
+		max-height: 95vh;
+		border-radius: var(--insta-radius-md);
+	}
+
+	.insta-lightbox-media {
+		max-height: 65vh;
+	}
+
+	.insta-lightbox-media img,
+	.insta-lightbox-media video {
+		max-height: 65vh;
+	}
+
+	.insta-lightbox-media.is-profile-pic {
+		padding: 16px;
+		min-height: 280px;
+	}
+
+	.insta-lightbox-media.is-profile-pic img {
+		max-width: 92vw;
+		max-height: 60vh;
+		width: auto;
+		height: auto;
+	}
+
+	.insta-lightbox-actions {
+		flex-wrap: wrap;
+		gap: 8px;
+		padding: 12px 14px;
+	}
+
+	.insta-lightbox-download,
+	.insta-lightbox-instagram {
+		flex: 1;
+		justify-content: center;
+		padding: 10px 14px;
+		font-size: 0.85rem;
+		min-width: 0;
+	}
+
+	.insta-lightbox-caption {
+		padding: 10px 14px 14px;
+		font-size: 0.825rem;
 	}
 }
